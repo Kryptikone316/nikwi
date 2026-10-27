@@ -33,6 +33,12 @@
 #include <unistd.h>
 #include "hw/hwaudio.h"
 #include "hw/hwdsp.h"
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#define STB_VORBIS_HEADER_ONLY
+#define STB_VORBIS_NO_PUSHDATA_API
+#define STB_VORBIS_NO_STDIO
+#include "hw/stb_vorbis.h"
 /* Relative to the working directory: run.sh cd's into the port folder
  * before launching, so this follows the port wherever it is installed
  * (the old absolute /mnt/sdcard/ports/nikwi path went stale when ports
@@ -153,6 +159,20 @@ static short	*musicWave = NULL;
 static long	musicLen = 0;
 static long	musicPos = 0;
 static long	musicLoopStart = 0;
+
+/* A track can be a raw PCM file (bgmN.raw, fully loaded at once) or an Ogg
+ * Vorbis file (bgmN.ogg). An Ogg track is decoded into musicWave by a
+ * background thread while it plays: musicReady is how many frames are
+ * decoded so far (it equals musicLen once the track is complete), and the
+ * mixer plays only what is ready. */
+static volatile long	musicReady = 0;
+static unsigned char	*musicOggData = NULL;
+static stb_vorbis	*musicVorbis = NULL;
+static int		musicChannels = 1;
+static pthread_t	musicDecodeThread;
+static volatile int	musicDecodeRun = 0;
+static bool		musicDecodeActive = false;
+static volatile long	musicStalledTicks = 0;
 
 /* Per-track loop point, in frames at MUSIC_RATE (48000Hz). The tracks that
  * ship with the port are rendered as seamless loops (the end is crossfaded
@@ -286,6 +306,8 @@ static void generateTick()
 	 * re-checking it still matches before committing is what detects
 	 * that. */
 	short	*mixedMusicWave = musicWave;
+	long	musicAvail = musicReady;
+	__sync_synchronize();
 	if (musicWave && musicLen > 0)
 	{
 		long	len = musicLen;
@@ -294,12 +316,27 @@ static void generateTick()
 		if (loopLen <= 0)
 			loopLen = len;
 
-		for (i=0;i<TICKFRAMES;i++)
+		if (musicAvail >= len)
 		{
-			long	rawIdx = musicBegin + i;
-			long	idx = (rawIdx < len) ? rawIdx
-				: loopStart + ((rawIdx - len) % loopLen);
-			mixbuf[i] += (int)((double)musicWave[idx] * MUSIC_GAIN);
+			for (i=0;i<TICKFRAMES;i++)
+			{
+				long	rawIdx = musicBegin + i;
+				long	idx = (rawIdx < len) ? rawIdx
+					: loopStart + ((rawIdx - len) % loopLen);
+				mixbuf[i] += (int)((double)musicWave[idx] * MUSIC_GAIN);
+			}
+		}
+		else
+		{
+			/* Still decoding: play only what is ready, silence beyond. */
+			for (i=0;i<TICKFRAMES;i++)
+			{
+				long	rawIdx = musicBegin + i;
+				if (rawIdx < musicAvail)
+					mixbuf[i] += (int)((double)musicWave[rawIdx] * MUSIC_GAIN);
+			}
+			if (musicBegin + TICKFRAMES > musicAvail)
+				musicStalledTicks++;
 		}
 	}
 
@@ -383,7 +420,9 @@ static void generateTick()
 		 * Same loop-start-aware wrap as the mixing loop above (NOT a
 		 * plain `% musicLen` - see musicLoopStartFrame[]'s comment). */
 		long	rawPos = musicBegin + accepted;
-		if (rawPos < musicLen)
+		if (musicAvail < musicLen)
+			musicPos = (rawPos < musicAvail) ? rawPos : musicAvail;	/* hold at the decoded edge */
+		else if (rawPos < musicLen)
 			musicPos = rawPos;
 		else
 		{
@@ -397,39 +436,161 @@ static void generateTick()
 	pthread_mutex_unlock(&mix_mtx);
 }
 
-/* Matches the PSP port's own playMusic(level%8) / playMusic(8) scheme -
- * track is 0-8, pre-rendered PCM files named to match
- * (data/audio/bgm0.raw .. bgm8.raw). Only one track is ever resident in
- * memory - the previous one (if any) is freed before the new one loads,
- * same one-at-a-time behavior the original Mix_LoadMUS()/Mix_FreeMusic()
- * calls had. Safe to call redundantly with the same track already
- * playing (matches upstream: it just restarts from the beginning, same
- * as upstream's own stopMusic()-then-reload-every-call behavior). */
+/* Music tracks: 0-7 are level music (see playLevelMusic()), 8 is the title
+ * and menu music. Each is data/audio/bgmN.ogg (Ogg Vorbis, mono or stereo,
+ * 48000 Hz, decoded in the background) or data/audio/bgmN.raw (headerless
+ * 16-bit mono PCM at 48000 Hz). The .ogg is used if both exist. Only one
+ * track is ever resident in memory - the previous one is freed before the
+ * new one is swapped in. Calling it again restarts the track from the
+ * beginning. A missing file means no music. */
+static void stopMusicDecode()
+{
+	if (musicDecodeActive)
+	{
+		musicDecodeRun = 0;
+		pthread_join(musicDecodeThread, NULL);
+		musicDecodeActive = false;
+	}
+}
+
+static void *musicDecodeFn(void*)
+{
+	short		chunk[2048*2];
+	long		pos = 0;
+	long		total = musicLen;
+	struct timespec	t0, t1;
+
+	/* The game loop never sleeps, so run slightly below normal priority:
+	 * the decoder still gets a fair share, but never starves the game or
+	 * the mixer thread. */
+	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5);
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	while (musicDecodeRun && pos < total)
+	{
+		int	n = stb_vorbis_get_samples_short_interleaved(musicVorbis,
+			musicChannels, chunk, 2048 * musicChannels);
+		if (n <= 0)
+			break;
+		if (pos + n > total)
+			n = (int)(total - pos);
+		if (musicChannels == 1)
+			memcpy(musicWave + pos, chunk, (size_t)n * sizeof(short));
+		else
+			for (int i=0;i<n;i++)
+				musicWave[pos + i] = (short)((chunk[2*i] + chunk[2*i + 1]) / 2);
+		pos += n;
+		__sync_synchronize();
+		musicReady = pos;
+	}
+	if (musicDecodeRun && pos < total)
+	{
+		/* The stream ended early: the track is as long as what decoded. */
+		pthread_mutex_lock(&mix_mtx);
+		musicLen = pos;
+		pthread_mutex_unlock(&mix_mtx);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+	if (musicDecodeRun)
+		fprintf(stderr, "music: decoded %.1fs of audio in %.1fs (%ld ticks waited for the decoder)\n",
+			(double)pos / HWAUDIO_RATE,
+			(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9,
+			(long)musicStalledTicks);
+	return NULL;
+}
+
 void playMusic(int track)
 {
-	char	path[32];
-	uint	dataLen;
-	short	*wave;
+	char		path[32];
+	uint		dataLen;
+	short		*wave = NULL;
+	long		total = 0;
+	unsigned char	*ogg;
+	stb_vorbis	*vorbis = NULL;
+	int		channels = 1;
 
 	if (noSound || track < 0 || track > 8)
 		return;
 
-	sprintf(path, "data/audio/bgm%d.raw", track);
-	wave = (short*)getData(path, dataLen);
+	sprintf(path, "data/audio/bgm%d.ogg", track);
+	ogg = (unsigned char*)getData(path, dataLen);
+	if (ogg)
+	{
+		int	err = 0;
+		vorbis = stb_vorbis_open_memory(ogg, (int)dataLen, &err, NULL);
+		if (vorbis)
+		{
+			stb_vorbis_info	info = stb_vorbis_get_info(vorbis);
+			total = (long)stb_vorbis_stream_length_in_samples(vorbis);
+			if (info.sample_rate == (unsigned)MUSIC_RATE &&
+				(info.channels == 1 || info.channels == 2) && total > 0)
+			{
+				channels = info.channels;
+				wave = (short*)malloc((size_t)total * sizeof(short));
+			}
+			else
+				fprintf(stderr, "music: %s must be 48000 Hz mono or stereo (is %u Hz, %d channels)\n",
+					path, info.sample_rate, info.channels);
+			if (!wave)
+			{
+				stb_vorbis_close(vorbis);
+				vorbis = NULL;
+			}
+		}
+		else
+			fprintf(stderr, "music: cannot read %s (error %d)\n", path, err);
+		if (!vorbis)
+		{
+			free(ogg);
+			ogg = NULL;
+		}
+	}
 	if (!wave)
-		return;
+	{
+		sprintf(path, "data/audio/bgm%d.raw", track);
+		wave = (short*)getData(path, dataLen);
+		if (!wave)
+			return;
+		total = dataLen / 2;
+	}
+
+	stopMusicDecode();
 
 	pthread_mutex_lock(&mix_mtx);
-	if (musicWave)
-		free(musicWave);
+	short		*oldWave = musicWave;
+	unsigned char	*oldOgg = musicOggData;
+	stb_vorbis	*oldVorbis = musicVorbis;
 	musicWave = wave;
-	musicLen = dataLen / 2;
+	musicLen = total;
 	musicPos = 0;
 	musicLoopStart = musicLoopStartFrame[track];
+	musicOggData = ogg;
+	musicVorbis = vorbis;
+	musicChannels = channels;
+	musicReady = vorbis ? 0 : total;
+	musicStalledTicks = 0;
 	pthread_mutex_unlock(&mix_mtx);
+
+	if (oldVorbis)
+		stb_vorbis_close(oldVorbis);
+	free(oldOgg);
+	free(oldWave);
+
+	if (vorbis)
+	{
+		musicDecodeRun = 1;
+		if (pthread_create(&musicDecodeThread, NULL, musicDecodeFn, NULL) == 0)
+			musicDecodeActive = true;
+		else
+		{
+			musicDecodeRun = 0;
+			pthread_mutex_lock(&mix_mtx);
+			musicLen = 0;
+			pthread_mutex_unlock(&mix_mtx);
+		}
+	}
 }
 
-/* Number of level tracks that exist: bgm0.raw, bgm1.raw, ... up to 8, counting
+/* Number of level tracks that exist: bgm0, bgm1, ... up to 8 (.ogg or .raw), counting
  * until the first one that is missing. The title/menu track (bgm8.raw) is
  * separate. Checked once. */
 static int levelTrackCount()
@@ -442,9 +603,13 @@ static int levelTrackCount()
 		count = 0;
 		while (count < 8)
 		{
-			sprintf(path, "data/audio/bgm%d.raw", count);
+			sprintf(path, "data/audio/bgm%d.ogg", count);
 			if (access(path, R_OK) != 0)
-				break;
+			{
+				sprintf(path, "data/audio/bgm%d.raw", count);
+				if (access(path, R_OK) != 0)
+					break;
+			}
 			count++;
 		}
 	}
@@ -549,6 +714,14 @@ void shutdownSound()
 	if (hwaudio_active())
 		hwaudio_deinit();
 
+	stopMusicDecode();
+	if (musicVorbis)
+	{
+		stb_vorbis_close(musicVorbis);
+		musicVorbis = NULL;
+	}
+	free(musicOggData);
+	musicOggData = NULL;
 	if (musicWave)
 	{
 		free(musicWave);

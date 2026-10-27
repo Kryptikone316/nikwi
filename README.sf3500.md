@@ -29,7 +29,23 @@ The program needs `data/` next to it. The author's `makedata.sh` creates
 
 ## Background music
 
-The port can play one of nine tracks per level from `data/audio/bgm0.raw` to
-`bgm8.raw`: headerless raw PCM, mono, 48000 Hz, signed 16-bit little endian.
-They are not part of this repository. The original game has no music, and if
-the files are missing the game simply plays none.
+The original game has no music. The port can play background music: one track
+per level (`data/audio/bgm0` to `bgm7`) and one for the title and menu screens
+(`bgm8`). Each is either `bgmN.ogg` (Ogg Vorbis, mono or stereo, 48000 Hz) or
+`bgmN.raw` (headerless raw PCM, mono, 48000 Hz, signed 16-bit little endian);
+the `.ogg` is used if both exist. An Ogg track is decoded in the background
+while it plays (the log prints how long each one took). The level tracks that
+exist are used in turn, so one to eight tracks all work, and missing files mean
+no music.
+
+The tracks are not part of this repository. A pack of six (five level tracks
+and a menu track, arranged specifically for this title and released under
+CC0) is a separate download: see the releases of this repository.
+
+To make a track from any audio file:
+
+```sh
+ffmpeg -i song.mp3 -ac 1 -ar 48000 -c:a libvorbis -q:a 4 bgm0.ogg
+```
+
+`src/hw/stb_vorbis.h` is Sean Barrett's public domain Ogg Vorbis decoder.
