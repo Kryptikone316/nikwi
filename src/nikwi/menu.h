@@ -27,6 +27,10 @@
 #ifndef __MENU_H_INCLUDED__
 #define __MENU_H_INCLUDED__
 
+#ifdef SF3500
+#include "hw/charpicker.h"
+#endif
+
 struct MenuScreen : public Screen
 {
 	int		opt;
@@ -37,6 +41,19 @@ struct MenuScreen : public Screen
 	char		pwd[7];
 	int		pwdLen;
 	bool		pwdMode;
+#ifdef SF3500
+	/* Drives the "which letter is currently highlighted but not yet
+	 * committed" cycling - this device has no keyboard, so main.cpp's
+	 * joykey input calls charpicker_up()/_down()/_confirm() on this.
+	 * Committing still synthesizes the real SDLK_a+offset keydown this
+	 * screen's existing handleEvent() pwdMode block already expects
+	 * (unchanged) - this struct's own internal buffer/length is just
+	 * along for the ride for Nikwi's integration (pwd[]/pwdLen below
+	 * remain the real gameplay state); draw() uses it only to render
+	 * the live candidate letter. See hw/charpicker.h for the full,
+	 * reusable (not Nikwi-specific) design. */
+	CharPicker	picker;
+#endif
 	uint		pausedShow;
 	Sprite		*sprite;
 	SpriteState	*spriteState;

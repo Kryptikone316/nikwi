@@ -4,8 +4,18 @@
 
 OUTPUT = nikwi
 SOURCES = $(wildcard src/nikwi/*.cpp) src/slashfx/main.c $(wildcard src/slashtdp/*.cpp) $(wildcard src/us/*.cpp) src/badcfg/main.c
+# SF3500 hw bridge files (hwdisp/hwaudio/joykey and helpers). These are .c (not .cpp)
+# on purpose: they must be compiled with $(CC)/gcc, never g++, since
+# hwaudio.c uses `try` as a variable name (a C++ keyword) - the implicit
+# make pattern rules already route .c through $(CC) correctly.
+ifdef SF3500
+SOURCES += $(wildcard src/hw/*.c)
+endif
 OBJECTS = $(patsubst %.c,%.o,$(patsubst %.cpp,%.o,$(SOURCES)))
 HEADERS = $(wildcard src/nikwi/*.h) src/slashfx/slashfx.h $(wildcard src/slashtdp/slashtdp/*.h) $(wildcard src/us/uscript/*.h) src/badcfg/badcfg.h
+ifdef SF3500
+LIBS = -lSDL -lpthread -ldl -lm
+else
 ifeq ($(shell uname -s),Darwin)
 LIBS = -m32 -framework SDL -framework Cocoa
 else
@@ -15,7 +25,11 @@ ifeq ($(shell uname -s | sed s/[0-9]*_.*//),MINGW)
 LIBS := $(LIBS) -mwindows -static-libgcc `$(CXX) -print-file-name=libstdc++.a`
 OBJECTS := $(OBJECTS) nikwi.res
 endif
-CFLAGS := -g3 -Wall -Wno-write-strings -Isrc/badcfg -Isrc/nikwi -Isrc/slashfx -Isrc/slashtdp -Isrc/us $(CFLAGS) $(XCFLAGS) $(CPPFLAGS)
+endif
+ifdef SF3500
+CFLAGS := -DSF3500 $(CFLAGS)
+endif
+CFLAGS := -g3 -Wall -Wno-write-strings -Isrc/badcfg -Isrc/nikwi -Isrc/slashfx -Isrc/slashtdp -Isrc/us -Isrc $(CFLAGS) $(XCFLAGS) $(CPPFLAGS)
 CXXFLAGS = $(CFLAGS)
 ifeq ($(shell uname -s),Darwin)
 CFLAGS := -m32 $(CFLAGS) -I/Library/Frameworks/SDL.framework/Headers

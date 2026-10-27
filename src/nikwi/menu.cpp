@@ -27,6 +27,10 @@
 
 #include "nikwi.h"
 
+#ifdef SF3500
+#include "hw/bitfont.h"
+#endif
+
 MenuScreen	*menuScreen = NULL;
 
 MenuScreen::MenuScreen()
@@ -35,6 +39,9 @@ MenuScreen::MenuScreen()
 	paused = loadImage("data/objects/paused.ut");
 	pwdBack = loadImage("data/objects/pwd2.ut");
 	pwdMode = false;
+#ifdef SF3500
+	charpicker_init(&picker, "abcdefghijklmnopqrstuvwxyz", CHARPICKER_MAX_LEN);
+#endif
 	dot = findSprite("dot");
 	sprite = NULL;
 	spriteState = NULL;
@@ -150,8 +157,55 @@ void MenuScreen::draw()
 			draw();
 			return;
 		}
+#ifdef SF3500
+		/* SF3500 port, third attempt. Second attempt (two stacked rows,
+		 * committed text at y=220 + candidate at y=268) came back from a
+		 * real-hardware photo with the committed row overlapping the
+		 * backdrop art's own baked-in "Enter the password:" label - that
+		 * label lives in the top of pwdBack's own blank area, confirmed
+		 * from the photo and from this function's ORIGINAL pre-port code
+		 * only ever drawing its one dot row at y=270 (the one spot the
+		 * artwork was actually designed with room for - there is no
+		 * second blank area above it). Fixed by merging both back into
+		 * ONE inline line at that single real blank spot: committed
+		 * letters first, then the bracketed live candidate immediately
+		 * after, x-offset by the committed text's own rendered width
+		 * (bitfont_string_width) rather than a second y position. Still
+		 * uses the shared bitfont.c renderer (hw/bitfont.h) and the
+		 * shared CharPicker (hw/charpicker.h) exactly as before - this
+		 * round only changed layout, not the input/state logic. */
+		{
+			unsigned short	*pix = (unsigned short*)screen->pixels;
+			int		stride = screen->pitch/2;
+			unsigned short	white = SDL_MapRGB(screen->format, 255, 255, 255);
+			unsigned short	yellow = SDL_MapRGB(screen->format, 255, 255, 0);
+			char		committed[7];
+			char		candidate[4];
+			const int	scale = 3, spacing = 2, baseX = 160, lineY = 268;
+
+			if (SDL_MUSTLOCK(screen))
+				SDL_LockSurface(screen);
+
+			memcpy(committed, pwd, pwdLen);
+			committed[pwdLen] = 0;
+			bitfont_draw_string(pix, stride, screen->w, screen->h,
+				baseX, lineY, scale, spacing, white, committed);
+
+			candidate[0] = '[';
+			candidate[1] = charpicker_current_char(&picker);
+			candidate[2] = ']';
+			candidate[3] = 0;
+			bitfont_draw_string(pix, stride, screen->w, screen->h,
+				baseX + bitfont_string_width(pwdLen, scale, spacing),
+				lineY, scale, spacing, yellow, candidate);
+
+			if (SDL_MUSTLOCK(screen))
+				SDL_UnlockSurface(screen);
+		}
+#else
 		for (int i=0;i<pwdLen;i++,x+=32)
 			dot->frame[0]->draw(x, 270, false);
+#endif
 	}
 }
 
@@ -230,6 +284,11 @@ void MenuScreen::handleEvent(SDL_Event &e)
 					break;
 				case 1:
 					pwdLen = 0;
+#ifdef SF3500
+					charpicker_init(&picker,
+						"abcdefghijklmnopqrstuvwxyz",
+						CHARPICKER_MAX_LEN);
+#endif
 					pwdMode = true;
 					break;
 				case 2:

@@ -40,7 +40,11 @@ struct Sample
 struct SampleQueueEntry
 {
 	Sample			*sample;
+#ifdef SF3500
+	double			srcpos;	/* fractional position, source-rate (22050Hz) frames */
+#else
 	uint			pos;
+#endif
 	SampleQueueEntry	*prev;
 	SampleQueueEntry	*next;
 };
@@ -53,6 +57,14 @@ void shutdownSound();
 Sample *findSample(uint code);
 
 void playSample(Sample *sample);
+
+#ifdef SF3500
+/* Background music - track 0-8, matches the PSP port's own
+ * playMusic(level%8)/playMusic(8) scheme. See sound.cpp's own comment
+ * block for the full design (pre-rendered looping PCM, not an on-device
+ * tracker player). */
+void playMusic(int track);
+#endif
 
 #endif
 
