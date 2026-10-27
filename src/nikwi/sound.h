@@ -59,11 +59,12 @@ Sample *findSample(uint code);
 void playSample(Sample *sample);
 
 #ifdef SF3500
-/* Background music - track 0-8, matches the PSP port's own
- * playMusic(level%8)/playMusic(8) scheme. See sound.cpp's own comment
- * block for the full design (pre-rendered looping PCM, not an on-device
- * tracker player). */
+/* Background music - track 0-8 (8 is the title/menu music). See sound.cpp's
+ * own comment block for the full design (pre-rendered looping PCM, not an
+ * on-device tracker player). playLevelMusic() picks among the level tracks
+ * (bgm0.raw, bgm1.raw, ...) that exist. Missing files mean no music. */
 void playMusic(int track);
+void playLevelMusic(int level);
 #endif
 
 #endif

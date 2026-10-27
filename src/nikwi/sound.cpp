@@ -30,6 +30,7 @@
 #ifdef SF3500
 #include <pthread.h>
 #include <time.h>
+#include <unistd.h>
 #include "hw/hwaudio.h"
 #include "hw/hwdsp.h"
 /* Relative to the working directory: run.sh cd's into the port folder
@@ -153,23 +154,16 @@ static long	musicLen = 0;
 static long	musicPos = 0;
 static long	musicLoopStart = 0;
 
-/* Per-track real loop point, in frames at MUSIC_RATE (48000Hz) - NOT
- * assumed to be 0 (file/order start) for every track. Found by actually
- * tracing each real module's own order/row sequence with libopenmpt's C
- * API (a small host-side tool, looppoint.c) until the first (order,row)
- * repeat - the same "has this song looped yet" detection libopenmpt's own
- * duration estimate uses - and recording what order playback resumes at
- * afterward. 7 of 9 tracks genuinely do loop back to the start (0); two
- * do not: track 0 has a ~19.2s intro (order 0) before settling into its
- * real loop at order 1, and track 3 has an ~8.0s intro (orders 0-1)
- * before its real loop at order 2. Naively wrapping either of those two
- * back to frame 0 would replay the intro every loop, audible as a
- * structural seam each time around - this table is what prevents that. */
+/* Per-track loop point, in frames at MUSIC_RATE (48000Hz). The tracks that
+ * ship with the port are rendered as seamless loops (the end is crossfaded
+ * into the start), so every track loops back to frame 0. The table is kept
+ * so a track that has an intro before its real loop point can still be
+ * described: put that offset here and the mixer wraps to it instead of 0. */
 static const long musicLoopStartFrame[9] = {
-	921856,	/* track 0: real loop starts at order 1 (~19.205s) */
 	0,
 	0,
-	384256,	/* track 3: real loop starts at order 2 (~8.005s) */
+	0,
+	0,
 	0,
 	0,
 	0,
@@ -277,12 +271,11 @@ static void generateTick()
 	 * softclip as everything else, not a separate limiter).
 	 *
 	 * Looping wraps to musicLoopStart, NOT unconditionally to 0 - see
-	 * musicLoopStartFrame[]'s own comment above for why (2 of the 9
-	 * tracks have a real intro before their actual loop point). The
-	 * `rawIdx >= len` branch below is the one spot a naive straight
-	 * `% len` would silently do the wrong thing for those two tracks,
-	 * including the rare case where a single 10ms tick's own window
-	 * straddles the exact wrap boundary mid-tick. */
+	 * musicLoopStartFrame[]'s own comment above. The `rawIdx >= len`
+	 * branch below is the one spot a naive straight `% len` would do the
+	 * wrong thing for a track with an intro, including the rare case
+	 * where a single 10ms tick's own window straddles the exact wrap
+	 * boundary mid-tick. */
 	long	musicBegin = musicPos;
 	/* Same unlock-window race as commitUpTo above, for the single global
 	 * music voice instead of a list: if playMusic() (main/game thread,
@@ -434,6 +427,39 @@ void playMusic(int track)
 	musicPos = 0;
 	musicLoopStart = musicLoopStartFrame[track];
 	pthread_mutex_unlock(&mix_mtx);
+}
+
+/* Number of level tracks that exist: bgm0.raw, bgm1.raw, ... up to 8, counting
+ * until the first one that is missing. The title/menu track (bgm8.raw) is
+ * separate. Checked once. */
+static int levelTrackCount()
+{
+	static int	count = -1;
+	char		path[32];
+
+	if (count < 0)
+	{
+		count = 0;
+		while (count < 8)
+		{
+			sprintf(path, "data/audio/bgm%d.raw", count);
+			if (access(path, R_OK) != 0)
+				break;
+			count++;
+		}
+	}
+	return count;
+}
+
+/* Music for a level: the level tracks that exist are used in turn, so a
+ * port with five tracks plays 0 1 2 3 4 0 1 2 ... as the levels go on, and one
+ * with eight behaves exactly like the original level%8 scheme. */
+void playLevelMusic(int level)
+{
+	int	n = levelTrackCount();
+
+	if (n > 0)
+		playMusic(level % n);
 }
 
 static void *mixerThreadFn(void*)

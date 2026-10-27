@@ -125,20 +125,11 @@ void Game::checkForPassword()
 void Game::restartLevel()
 {
 #ifdef SF3500
-	/* Matches the PSP port's own playMusic(level%8) trigger scheme (see
-	 * sound.cpp's playMusic()).
-	 * Upstream PSP's game.cpp calls playMusic(level%8) at 3 separate
-	 * sites (nextLevel() before incrementing level, newGame(), and
-	 * restartLevel() itself) - but nextLevel()/newGame() both always
-	 * call restartLevel() immediately afterward with `level` already at
-	 * its final value, and playMusic() always restarts from position 0
-	 * regardless of whether the SAME track was already playing, so
-	 * upstream's first two calls are immediately overwritten by the
-	 * third with no observable difference - just a redundant reload one
-	 * call earlier for no audible effect. One call here, with `level`
-	 * already correct by the time any of the 3 real call paths reach
-	 * this point, reproduces the exact same end state. */
-	playMusic(level%8);
+	/* One call here is enough: nextLevel() and newGame() both call
+	 * restartLevel() right after setting `level`, and playMusic() restarts the
+	 * track from the beginning, so the earlier calls in the PSP port's game.cpp
+	 * were always overwritten by this one. */
+	playLevelMusic(level);
 #endif
 	char	buff[32];
 	locked = false;
