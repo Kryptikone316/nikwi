@@ -173,6 +173,7 @@ static pthread_t	musicDecodeThread;
 static volatile int	musicDecodeRun = 0;
 static bool		musicDecodeActive = false;
 static volatile long	musicStalledTicks = 0;
+static int		musicTrack = -1;		/* which track musicWave holds */
 
 /* Per-track loop point, in frames at MUSIC_RATE (48000Hz). The tracks that
  * ship with the port are rendered as seamless loops (the end is crossfaded
@@ -455,20 +456,30 @@ static void stopMusicDecode()
 
 static void *musicDecodeFn(void*)
 {
-	short		chunk[2048*2];
+	short		chunk[1024*2];
 	long		pos = 0;
 	long		total = musicLen;
-	struct timespec	t0, t1;
+	struct timespec	t0, t1, c0, c1;
 
 	/* The game loop never sleeps, so run slightly below normal priority:
 	 * the decoder still gets a fair share, but never starves the game or
 	 * the mixer thread. */
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 5);
 	clock_gettime(CLOCK_MONOTONIC, &t0);
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c0);
 	while (musicDecodeRun && pos < total)
 	{
+		/* Decode only about three seconds ahead of the playhead. Playing
+		 * needs one second of audio per second, so this keeps the load low
+		 * and steady; decoding as fast as possible would take a large part
+		 * of the CPU for a long burst and slow the game down. */
+		if (pos - *(volatile long*)&musicPos > 3L * HWAUDIO_RATE)
+		{
+			usleep(20000);
+			continue;
+		}
 		int	n = stb_vorbis_get_samples_short_interleaved(musicVorbis,
-			musicChannels, chunk, 2048 * musicChannels);
+			musicChannels, chunk, 1024 * musicChannels);
 		if (n <= 0)
 			break;
 		if (pos + n > total)
@@ -490,11 +501,13 @@ static void *musicDecodeFn(void*)
 		pthread_mutex_unlock(&mix_mtx);
 	}
 	clock_gettime(CLOCK_MONOTONIC, &t1);
-	if (musicDecodeRun)
-		fprintf(stderr, "music: decoded %.1fs of audio in %.1fs (%ld ticks waited for the decoder)\n",
-			(double)pos / HWAUDIO_RATE,
-			(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9,
-			(long)musicStalledTicks);
+	clock_gettime(CLOCK_THREAD_CPUTIME_ID, &c1);
+	fprintf(stderr, "music: track %d %s: decoded %.1fs of %.1fs of audio over %.1fs, using %.2fs of CPU (%ld ticks waited for the decoder)\n",
+		musicTrack, (pos >= total) ? "complete" : "stopped",
+		(double)pos / HWAUDIO_RATE, (double)total / HWAUDIO_RATE,
+		(t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9,
+		(c1.tv_sec - c0.tv_sec) + (c1.tv_nsec - c0.tv_nsec) / 1e9,
+		(long)musicStalledTicks);
 	return NULL;
 }
 
@@ -510,6 +523,16 @@ void playMusic(int track)
 
 	if (noSound || track < 0 || track > 8)
 		return;
+
+	if (track == musicTrack && musicWave && musicLen > 0)
+	{
+		/* This track is already loaded (a level restart): start it over
+		 * without reading or decoding it again. */
+		pthread_mutex_lock(&mix_mtx);
+		musicPos = 0;
+		pthread_mutex_unlock(&mix_mtx);
+		return;
+	}
 
 	sprintf(path, "data/audio/bgm%d.ogg", track);
 	ogg = (unsigned char*)getData(path, dataLen);
@@ -566,6 +589,7 @@ void playMusic(int track)
 	musicOggData = ogg;
 	musicVorbis = vorbis;
 	musicChannels = channels;
+	musicTrack = track;
 	musicReady = vorbis ? 0 : total;
 	musicStalledTicks = 0;
 	pthread_mutex_unlock(&mix_mtx);
@@ -588,6 +612,16 @@ void playMusic(int track)
 			pthread_mutex_unlock(&mix_mtx);
 		}
 	}
+}
+
+/* For the log: 0 no music, 1 raw track, 2 Ogg track still decoding, 3 Ogg track fully decoded. */
+int musicMode()
+{
+	if (!musicWave || musicLen <= 0)
+		return 0;
+	if (!musicVorbis)
+		return 1;
+	return (musicReady >= musicLen) ? 3 : 2;
 }
 
 /* Number of level tracks that exist: bgm0, bgm1, ... up to 8 (.ogg or .raw), counting

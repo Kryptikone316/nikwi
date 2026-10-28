@@ -26,6 +26,7 @@
 */
 
 #include "nikwi.h"
+#include "timing.h"
 
 Game	*game = NULL;
 
@@ -124,18 +125,25 @@ void Game::checkForPassword()
 
 void Game::restartLevel()
 {
+	SlowTimer	restartTimer("restartLevel (total)");
 #ifdef SF3500
 	/* One call here is enough: nextLevel() and newGame() both call
 	 * restartLevel() right after setting `level`, and playMusic() restarts the
 	 * track from the beginning, so the earlier calls in the PSP port's game.cpp
 	 * were always overwritten by this one. */
-	playLevelMusic(level);
+	{
+		SlowTimer	t("playLevelMusic");
+		playLevelMusic(level);
+	}
 #endif
 	char	buff[32];
 	locked = false;
 	dead = false;
 	sprintf(buff, "data/worlds/world%i.w", level);
-	world->loadWorld(buff);
+	{
+		SlowTimer	t("loadWorld");
+		world->loadWorld(buff);
+	}
 	if (level == 30)
 		world->bgndImage = 255;
 	movingLeft = movingRight = jumping = wannaJump = false;
@@ -161,10 +169,20 @@ void Game::restartLevel()
 
 void Game::randomTransition()
 {
+	SlowTimer	transitionTimer("randomTransition (total)");
 	Transition 	*trans = createRandomTransition();
-	trans->begin();
-	draw();
-	trans->play();
+	{
+		SlowTimer	t("transition begin");
+		trans->begin();
+	}
+	{
+		SlowTimer	t("transition draw");
+		draw();
+	}
+	{
+		SlowTimer	t("transition play");
+		trans->play();
+	}
 	delete trans;
 	resetTimer();
 }

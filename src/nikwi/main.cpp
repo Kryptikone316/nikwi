@@ -26,12 +26,21 @@
 */
 
 #include "nikwi.h"
+#include "timing.h"
 
 #ifdef SF3500
 #include "hw/joykey.h"
 #include "hw/hwdisp.h"
 #include "hw/hwaudio.h"
 #include "hw/charpicker.h"
+#include <time.h>
+#ifdef SF3500
+#include <signal.h>
+#include <execinfo.h>
+#include <ucontext.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#endif
 #endif
 
 bool	running = true;
@@ -46,8 +55,133 @@ static void timedTasks()
 static uint	extra = 0;
 static uint	lastTicks = 0, ticks = 0;
 
+#ifdef SF3500
+/* Frame timing for the log: every 300 frames, how long frames take. */
+static void logFrameTiming(const struct timespec &start, const struct timespec &mid, const struct timespec &end)
+{
+	static struct timespec	last = { 0, 0 };
+	static long		frames = 0;
+	static double		sumInterval = 0, maxInterval = 0, sumDraw = 0, maxDraw = 0, sumPres = 0, maxPres = 0;
+	double			draw = (mid.tv_sec - start.tv_sec) * 1e3 + (mid.tv_nsec - start.tv_nsec) / 1e6;
+	double			pres = (end.tv_sec - mid.tv_sec) * 1e3 + (end.tv_nsec - mid.tv_nsec) / 1e6;
+
+	if (last.tv_sec || last.tv_nsec)
+	{
+		double	interval = (start.tv_sec - last.tv_sec) * 1e3 + (start.tv_nsec - last.tv_nsec) / 1e6;
+		sumInterval += interval;
+		if (interval > maxInterval)
+			maxInterval = interval;
+	}
+	sumDraw += draw;
+	if (draw > maxDraw)
+		maxDraw = draw;
+	sumPres += pres;
+	if (pres > maxPres)
+		maxPres = pres;
+	last = start;
+	if (++frames >= 300)
+	{
+		static const char	*modes[] = { "none", "raw", "ogg decoding", "ogg ready" };
+		fprintf(stderr, "frames: level %d, music %s, %.1f fps, frame interval avg %.1f ms max %.1f ms, drawing avg %.1f ms max %.1f ms, present avg %.1f ms max %.1f ms\n",
+			(activeScreen == game) ? (int)game->level : -1, modes[musicMode()],
+			1000.0 * (frames - 1) / sumInterval, sumInterval / (frames - 1), maxInterval,
+			sumDraw / frames, maxDraw, sumPres / frames, maxPres);
+		frames = 0;
+		sumInterval = maxInterval = sumDraw = maxDraw = sumPres = maxPres = 0;
+	}
+}
+#endif
+
+#ifdef SF3500
+/* Frame pacing. The game's logic steps every 20 ms (50 times a second). If
+ * frames are drawn faster than that and not in step with it, some frames
+ * contain no movement and the motion hitches. With a frame limit of 50 each
+ * frame gets exactly one logic step. nikwi.txt in the port folder sets it
+ * ("fps=50"; 0 switches the limiter off). */
+static long long	frameLimitNs = 20000000LL;
+static long long	tickAccNs = 0, tickLastNs = 0;
+static bool		tickStarted = false;
+static struct timespec	nextFrame;
+static bool		paceStarted = false;
+
+static long long nowNs()
+{
+	struct timespec	t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static void loadSettings()
+{
+	FILE	*f = fopen("nikwi.txt", "r");
+	char	line[128];
+	int	fps;
+
+	if (f)
+	{
+		while (fgets(line, sizeof(line), f))
+			if (sscanf(line, "fps=%d", &fps) == 1)
+				frameLimitNs = (fps > 0 && fps <= 200) ? 1000000000LL / fps : 0;
+		fclose(f);
+	}
+	if (frameLimitNs)
+		fprintf(stderr, "settings: frame limit %lld fps\n", 1000000000LL / frameLimitNs);
+	else
+		fprintf(stderr, "settings: no frame limit\n");
+}
+
+/* Wait for the next frame slot. If the frame was late, start the schedule over
+ * from now instead of rushing to catch up. */
+static void paceFrame(const struct timespec &frameStart)
+{
+	if (!frameLimitNs)
+		return;
+	if (!paceStarted)
+	{
+		nextFrame = frameStart;
+		paceStarted = true;
+	}
+	nextFrame.tv_nsec += (long)frameLimitNs;
+	while (nextFrame.tv_nsec >= 1000000000L)
+	{
+		nextFrame.tv_nsec -= 1000000000L;
+		nextFrame.tv_sec++;
+	}
+	struct timespec	now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	if (now.tv_sec > nextFrame.tv_sec ||
+		(now.tv_sec == nextFrame.tv_sec && now.tv_nsec >= nextFrame.tv_nsec))
+		nextFrame = now;
+	else
+		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &nextFrame, NULL);
+}
+#endif
+
 static void draw()
 {
+#ifdef SF3500
+	struct timespec	frameStart, frameMid, frameEnd;
+	clock_gettime(CLOCK_MONOTONIC, &frameStart);
+	{
+		SlowTimer	t("game logic");
+		long long	now = nowNs();
+		if (!tickStarted)
+		{
+			tickLastNs = now;
+			tickAccNs = 0;
+			tickStarted = true;
+		}
+		tickAccNs += now - tickLastNs;
+		tickLastNs = now;
+		if (tickAccNs > 200000000LL)
+			tickAccNs = 200000000LL;	/* after a long stall do not replay it */
+		while (tickAccNs >= 20000000LL)
+		{
+			timedTasks();
+			tickAccNs -= 20000000LL;
+		}
+	}
+#else
 	ticks = SDL_GetTicks();
 	if (ticks - lastTicks > 20)
 	{
@@ -58,15 +192,27 @@ static void draw()
 			timedTasks();
 		lastTicks = ticks;
 	}
+#endif
 	
 	activeScreen->draw();
-	
+#ifdef SF3500
+	clock_gettime(CLOCK_MONOTONIC, &frameMid);
+#endif
 	updateSystemScreen();
+#ifdef SF3500
+	clock_gettime(CLOCK_MONOTONIC, &frameEnd);
+	logFrameTiming(frameStart, frameMid, frameEnd);
+	paceFrame(frameStart);
+#endif
 }
 
 void resetTimer()
 {
 	ticks = lastTicks = SDL_GetTicks();
+#ifdef SF3500
+	tickStarted = false;
+	paceStarted = false;
+#endif
 }
 
 #ifdef SF3500
@@ -269,11 +415,17 @@ static void mainLoop()
 {
 	while (running)
 	{
-		usRunScripts();
+		{
+			SlowTimer	t("scripts");
+			usRunScripts();
+		}
 		draw();
 
 #ifdef SF3500
-		pollJoykey();
+		{
+			SlowTimer	t("input handling");
+			pollJoykey();
+		}
 #else
 		SDL_Event	e;
 		while (SDL_PollEvent(&e))
@@ -348,10 +500,66 @@ static void mainLoop()
 #ifdef __APPLE__
 extern "C" int SDL_main(int argn, char** argv)
 #else
+#ifdef SF3500
+/* Crash report for the log: which signal, the faulting address, the program
+ * counter and return address (as offsets from main(), so they can be matched
+ * against an unstripped build), whether it was the main thread, and the top of
+ * the stack. The device has no debugger, so this is how a crash gets found. */
+int main(int, char **);
+static void crashHandler(int sig, siginfo_t *info, void *context)
+{
+	ucontext_t	*uc = (ucontext_t*)context;
+	unsigned long	mainAddr = (unsigned long)&main;
+	unsigned long	pc = (unsigned long)uc->uc_mcontext.pc;
+	unsigned long	ra = (unsigned long)uc->uc_mcontext.gregs[31];
+	unsigned long	sp = (unsigned long)uc->uc_mcontext.gregs[29];
+	void		*frames[24];
+	int		n;
+
+	fprintf(stderr, "CRASH: signal %d (code %d), fault address %p, %s thread\n",
+		sig, info->si_code, info->si_addr,
+		(syscall(SYS_gettid) == getpid()) ? "main" : "other");
+	fprintf(stderr, "CRASH: main() is at 0x%lx; pc = main%+ld, ra = main%+ld, sp = 0x%lx\n",
+		mainAddr, (long)(pc - mainAddr), (long)(ra - mainAddr), sp);
+	fprintf(stderr, "CRASH: stack words (as offsets from main when they look like code):");
+	for (int i=0;i<48;i++)
+	{
+		unsigned long	w = ((unsigned long*)sp)[i];
+		if (w > mainAddr - 0x100000 && w < mainAddr + 0x100000)
+			fprintf(stderr, " %+ld", (long)(w - mainAddr));
+	}
+	fprintf(stderr, "\n");
+	n = backtrace(frames, 24);
+	fprintf(stderr, "CRASH: backtrace (offsets from main):");
+	for (int i=0;i<n;i++)
+		fprintf(stderr, " %+ld", (long)((unsigned long)frames[i] - mainAddr));
+	fprintf(stderr, "\n");
+	_exit(128 + sig);
+}
+
+static void installCrashHandler()
+{
+	struct sigaction	sa;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = crashHandler;
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGILL, &sa, NULL);
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+	sigaction(SIGFPE, &sa, NULL);
+	sigaction(SIGABRT, &sa, NULL);
+}
+#endif
+
 int main(int argn, char *argv[])
 #endif
 {
 	bool	editMode = false;
+#ifdef SF3500
+	installCrashHandler();
+	loadSettings();
+#endif
 	uint	startLevel = 0;
 	
 	for (int i=0;i<argn;i++)

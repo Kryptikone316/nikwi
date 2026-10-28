@@ -65,6 +65,7 @@ void playSample(Sample *sample);
  * (bgm0.raw, bgm1.raw, ...) that exist. Missing files mean no music. */
 void playMusic(int track);
 void playLevelMusic(int level);
+int musicMode();
 #endif
 
 #endif
