@@ -27,7 +27,10 @@ OBJECTS := $(OBJECTS) nikwi.res
 endif
 endif
 ifdef SF3500
-CFLAGS := -DSF3500 $(CFLAGS)
+# Optimised build: without this the game, its software drawing and its audio
+# mixer all run unoptimised. -fno-strict-aliasing because this 2005 code casts
+# between pixel and sample pointer types freely.
+CFLAGS := -DSF3500 -O2 -fno-strict-aliasing $(CFLAGS)
 endif
 CFLAGS := -g3 -Wall -Wno-write-strings -Isrc/badcfg -Isrc/nikwi -Isrc/slashfx -Isrc/slashtdp -Isrc/us -Isrc $(CFLAGS) $(XCFLAGS) $(CPPFLAGS)
 CXXFLAGS = $(CFLAGS)

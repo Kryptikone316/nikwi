@@ -9,6 +9,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include <uscript/uscript.h>
+#include <string.h>
 
 //UScriptByteCode
 UScriptByteCode::UScriptByteCode()
@@ -98,7 +99,11 @@ int UScriptByteCode::getInt(uint addr)
 
 float UScriptByteCode::getFloat(uint addr)
 {
-	return *((float*)&bc[addr]);
+	/* The bytecode is packed byte by byte, so addr is usually not aligned:
+	 * a direct float load faults on some CPUs (MIPS). */
+	float	f;
+	memcpy(&f, &bc[addr], sizeof(f));
+	return f;
 }
 
 String UScriptByteCode::getSS(uint index)

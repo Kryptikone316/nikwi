@@ -9,6 +9,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include <uscript/uscript.h>
+#include <string.h>
 
 typedef void	(*OpFunc)(UScriptVM*);
 
@@ -74,42 +75,37 @@ static void opPopPB(UScriptVM *vm)
 
 static void opLoadA(UScriptVM *vm)
 {
-	vm->a = *((int*)&vm->memory[vm->bc->getInt(vm->addr)]);
+	memcpy(&vm->a, &vm->memory[vm->bc->getInt(vm->addr)], sizeof(vm->a));
 	vm->addr += 4;
 }
 
 static void opLoadFA(UScriptVM *vm)
 {
-	vm->fa = *((float*)&vm->memory[vm->bc->getInt(vm->addr)]);
+	memcpy(&vm->fa, &vm->memory[vm->bc->getInt(vm->addr)], sizeof(vm->fa));
 	vm->addr += 4;
 }
 
 static void opLoadPA(UScriptVM *vm)
 {
-	int	i;
-	vm->pa = *((void**)&vm->memory[i = vm->bc->getInt(vm->addr)]);
+	memcpy(&vm->pa, &vm->memory[vm->bc->getInt(vm->addr)], sizeof(vm->pa));
 	vm->addr += 4;
 }
 
 static void opSaveA(UScriptVM *vm)
 {
-	int	*dest = (int*)&vm->memory[vm->bc->getInt(vm->addr)];
-	*dest = vm->a;
+	memcpy(&vm->memory[vm->bc->getInt(vm->addr)], &vm->a, sizeof(vm->a));
 	vm->addr += 4;
 }
 
 static void opSaveFA(UScriptVM *vm)
 {
-	float	*dest = (float*)&vm->memory[vm->bc->getInt(vm->addr)];
-	*dest = vm->fa;
+	memcpy(&vm->memory[vm->bc->getInt(vm->addr)], &vm->fa, sizeof(vm->fa));
 	vm->addr += 4;
 }
 
 static void opSavePA(UScriptVM *vm)
 {
-	int	i;
-	void	**dest = (void**)&vm->memory[i = vm->bc->getInt(vm->addr)];
-	*dest = vm->pa;
+	memcpy(&vm->memory[vm->bc->getInt(vm->addr)], &vm->pa, sizeof(vm->pa));
 	vm->addr += 4;
 }
 
