@@ -183,9 +183,40 @@ void World::saveWorld(String file)
 	fclose(f);
 }
 
+/* Merging the tile edges into physics segments is slow on the handhelds (over a
+ * second for the larger levels) and restarting a level after a death rebuilds
+ * exactly the same layout, so the last result is kept. It costs a few KB. */
+static uint		*physSig = NULL;
+static uint		physSigLen = 0;
+static SlashTDP::Segment	*physSegs = NULL;
+static uint		physSegCount = 0;
+
 void World::prepareForPhysics()
 {
+	uint	sigLen = 2 + width*height, tiles = 0;
+	uint	*sig = (uint*)malloc(sizeof(uint)*sigLen);
+	sig[0] = width;
+	sig[1] = height;
+	for (uint i=0;i<width*height;i++)
+	{
+		sig[2 + i] = tile[i] ? tile[i]->tclass->code : 0;
+		if (tile[i])
+			tiles++;
+	}
+	
 	world.newWorld();
+	if (tiles && physSig && physSigLen == sigLen &&
+		!memcmp(physSig, sig, sizeof(uint)*sigLen))
+	{
+		free(sig);
+		world.segment = (SlashTDP::Segment*)malloc(
+			sizeof(SlashTDP::Segment)*physSegCount);
+		memcpy(world.segment, physSegs,
+			sizeof(SlashTDP::Segment)*physSegCount);
+		world.segments = world.segmentCap = physSegCount;
+		return;
+	}
+	
 	for (uint y=0;y<height;y++)
 		for (uint x=0;x<width;x++)
 			if (tile[y*width + x])
@@ -198,6 +229,20 @@ void World::prepareForPhysics()
 				world.addBox(x1, y1, x2, y2);
 			}
 	world.optimize();
+	
+	if (!tiles)
+	{
+		free(sig);
+		return;
+	}
+	free(physSig);
+	free(physSegs);
+	physSig = sig;
+	physSigLen = sigLen;
+	physSegCount = world.segments;
+	physSegs = (SlashTDP::Segment*)malloc(
+		sizeof(SlashTDP::Segment)*physSegCount);
+	memcpy(physSegs, world.segment, sizeof(SlashTDP::Segment)*physSegCount);
 }
 
 Object *World::createObject(uint code, int x, int y)

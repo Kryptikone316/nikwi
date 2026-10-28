@@ -21,6 +21,7 @@
  * Kostas Michalopoulos <badsector@runtimelegend.com>
  */
 
+#include <string.h>
 #include <slashtdp/slashtdp.h>
 
 using namespace SlashTDP;
@@ -30,6 +31,7 @@ World::World()
 {
 	segment = NULL;
 	segments = 0;
+	segmentCap = 0;
 	firstBody = lastBody = NULL;
 	resistance.x = 0.9f;
 	resistance.y = 0.99f;
@@ -46,12 +48,19 @@ void World::newWorld()
 	removeAllBodies();
 	segment = NULL;
 	segments = 0;
+	segmentCap = 0;
 	firstBody = lastBody = NULL;
 }
 
 void World::addSegment(const Segment &seg)
 {
-	segment = (Segment*)realloc(segment, sizeof(Segment)*(segments + 1));
+	/* Grow geometrically: a realloc per segment fragments the heap and made
+	 * loading a level slow and wasteful on low-memory devices. */
+	if (segments == segmentCap)
+	{
+		segmentCap = segmentCap ? segmentCap*2 : 64;
+		segment = (Segment*)realloc(segment, sizeof(Segment)*segmentCap);
+	}
 	segment[segments] = seg;
 	segment[segments++].calcNAndC();
 }
@@ -66,10 +75,9 @@ void World::addBox(float x1, float y1, float x2, float y2)
 
 void World::removeSegment(uint index)
 {
-	for (uint i=index;i<segments-1;i++)
-		segment[i] = segment[i + 1];
+	memmove(&segment[index], &segment[index + 1],
+		sizeof(Segment)*(segments - index - 1));
 	segments--;
-	segment = (Segment*)realloc(segment, sizeof(Segment)*segments);
 }
 
 void World::removeAllSegments()
@@ -78,6 +86,7 @@ void World::removeAllSegments()
 		free(segment);
 	segment = NULL;
 	segments = 0;
+	segmentCap = 0;
 }
 
 bool World::optimizeSegment(uint index)
@@ -212,6 +221,13 @@ void World::optimize()
 	
 	for (uint i=0;i<segments;i++)
 		segment[i].calcNAndC();
+
+	/* The merge pass removes most of the segments: hand the spare room back. */
+	if (segments && segments < segmentCap)
+	{
+		segment = (Segment*)realloc(segment, sizeof(Segment)*segments);
+		segmentCap = segments;
+	}
 	
 //	printf("Segments after optimization = %i\n", segments);
 }

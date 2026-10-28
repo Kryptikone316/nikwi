@@ -331,6 +331,7 @@ namespace SlashTDP
 	{
 		Segment		*segment;
 		uint		segments;
+		uint		segmentCap;
 		Vector		resistance;
 		
 		Body		*firstBody;
